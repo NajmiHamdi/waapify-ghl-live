@@ -1,133 +1,85 @@
-/*you provided is a TypeScript code that sets up an Express server and defines several routes
-for handling HTTP requests. */
 import express, { Express, Request, Response } from "express";
 import dotenv from "dotenv";
 import { GHL } from "./ghl";
-import * as CryptoJS from 'crypto-js'
+import { Storage } from "./storage";
 import { json } from "body-parser";
 
-const path = __dirname + "/ui/dist/";
+// Routes
+import testCreateContactRoute from "./route/test-create-contact";
+import listContactsRoute from "./route/list-contacts";
+import updateContactRoute from "./route/update-contact";
+import deleteContactRoute from "./route/delete-contact";
 
 dotenv.config();
-const app: Express = express();
-app.use(json({ type: 'application/json' }))
 
-/*`app.use(express.static(path));` is setting up a middleware in the Express server. The
-`express.static` middleware is used to serve static files such as HTML, CSS, JavaScript, and images. */
+const app: Express = express();
+const ghl = new GHL();
+const port = process.env.PORT || 3000;
+const path = __dirname + "/ui/dist/";
+
+// Body parser
+app.use(json({ type: "application/json" }));
+
+// Static folder
 app.use(express.static(path));
 
-/* The line `const ghl = new GHL();` is creating a new instance of the `GHL` class. It is assigning
-this instance to the variable `ghl`. This allows you to use the methods and properties defined in
-the `GHL` class to interact with the GoHighLevel API. */
-const ghl = new GHL();
+// Mount routes
+app.use("/test-create-contact", testCreateContactRoute);
+app.use("/list-contacts", listContactsRoute);
+app.use("/update-contact", updateContactRoute);
+app.use("/delete-contact", deleteContactRoute);
 
-const port = process.env.PORT;
-
-/*`app.get("/authorize-handler", async (req: Request, res: Response) => { ... })` sets up an example how you can authorization requests */
+/* -------------------- Authorization handler -------------------- */
 app.get("/authorize-handler", async (req: Request, res: Response) => {
   const { code } = req.query;
-  await ghl.authorizationHandler(code as string);
-  res.redirect("https://app.gohighlevel.com/");
-});
+  if (!code) return res.status(400).send("No code received");
 
-/*`app.get("/example-api-call", async (req: Request, res: Response) => { ... })` shows you how you can use ghl object to make get requests
- ghl object in abstract would handle all of the authorization part over here. */
-app.get("/example-api-call", async (req: Request, res: Response) => {
-  if (ghl.checkInstallationExists(req.query.companyId as string)) {
-    try {
-      const request = await ghl
-        .requests(req.query.companyId as string)
-        .get(`/users/search?companyId=${req.query.companyId}`, {
-          headers: {
-            Version: "2021-07-28",
-          },
-        });
-      return res.send(request.data);
-    } catch (error) {
-      console.log(error);
-    }
-  }
-  return res.send("Installation for this company does not exists");
-});
-
-/*`app.get("/example-api-call-location", async (req: Request, res: Response) => { ... })` shows you how you can use ghl object to make get requests
- ghl object in abstract would handle all of the authorization part over here. */
-app.get("/example-api-call-location", async (req: Request, res: Response) => {
-  /* The line `if(ghl.checkInstallationExists(req.params.locationId)){` is checking if an
-    installation already exists for a specific location. It calls the `checkInstallationExists`
-    method of the `GHL` class and passes the `locationId` as a parameter. This method checks if
-    there is an existing installation for the provided locationId and returns a boolean value
-    indicating whether the installation exists or not. */
   try {
-    if (ghl.checkInstallationExists(req.params.locationId)) {
-      const request = await ghl
-        .requests(req.query.locationId as string)
-        .get(`/contacts/?locationId=${req.query.locationId}`, {
-          headers: {
-            Version: "2021-07-28",
-          },
-        });
-      return res.send(request.data);
-    } else {
-      /* NOTE: This flow would only work if you have a distribution type of both Location & Company & OAuth read-write scopes are configured. 
-        The line `await ghl.getLocationTokenFromCompanyToken(req.query.companyId as string, req.query.locationId as string)`
-         is calling the `getLocationTokenFromCompanyToken` method of the
-        `GHL` class. This method is used to retrieve the location token for a specific location within a company. */
-      await ghl.getLocationTokenFromCompanyToken(
-        req.query.companyId as string,
-        req.query.locationId as string
-      );
-      const request = await ghl
-        .requests(req.query.locationId as string)
-        .get(`/contacts/?locationId=${req.query.locationId}`, {
-          headers: {
-            Version: "2021-07-28",
-          },
-        });
-      return res.send(request.data);
-    }
+    await ghl.authorizationHandler(code as string);
+
+    const installations = Storage.getAll();
+    console.log("=== All installations ===", installations);
+
+    res.redirect("https://app.gohighlevel.com/");
   } catch (error) {
-    console.log(error);
-    res.send(error).status(400)
+    console.error("Authorization error:", error);
+    res.status(500).send("Authorization failed");
   }
 });
 
-/*`app.post("example-webhook-handler",async (req: Request, res: Response) => {
-    console.log(req.body)
-})` sets up a route for handling HTTP POST requests to the "/example-webhook-handler" endpoint. The below POST
-api can be used to subscribe to various webhook events configured for the app. */
-app.post("/example-webhook-handler",async (req: Request, res: Response) => {
-    console.log(req.body)
-})
+/* -------------------- Example API Call with Location -------------------- */
+app.get("/example-api-call-location", async (req, res) => {
+  const { companyId, locationId } = req.query as { companyId: string; locationId: string };
 
+  if (!companyId || !locationId) return res.status(400).send("Missing companyId or locationId");
 
-/* The `app.post("/decrypt-sso",async (req: Request, res: Response) => { ... })` route is used to
-decrypt session details using ssoKey. */
-app.post("/decrypt-sso",async (req: Request, res: Response) => {
-  const {key} = req.body || {}
-  if(!key){
-    return res.status(400).send("Please send valid key")
-  }
   try {
-    const data = ghl.decryptSSOData(key)
-    res.send(data)
+    if (!ghl.checkInstallationExists(companyId)) {
+      return res.status(400).send("Company token not found. Authorize app first.");
+    }
+
+    let token = Storage.getTokenForLocation(locationId);
+    if (!token) {
+      await ghl.getLocationTokenFromCompanyToken(companyId, locationId);
+      token = Storage.getTokenForLocation(locationId);
+    }
+
+    if (!token) return res.status(400).send("Failed to get access token for location");
+
+    const request = await ghl.requests(companyId).get(`/contacts/?locationId=${locationId}`, {
+      headers: { Version: "2021-07-28" },
+    });
+
+    console.log("Location API response:", request.data);
+    res.json(request.data);
   } catch (error) {
-    res.status(400).send("Invalid Key")
-    console.log(error)  
+    console.error("/example-api-call-location error:", error);
+    res.status(400).send(error);
   }
-})
-
-/*`app.get("/", function (req, res) {
-  res.sendFile(path + "index.html");
-});` sets up a route for the root URL ("/") of the server.  This is
- used to serve the main HTML file of a web application. */
-app.get("/", function (req, res) {
-  res.sendFile(path + "index.html");
 });
 
-/*`app.listen(port, () => {
-  console.log(`GHL app listening on port `);
-});` is starting the Express server and making it listen on the specified port. */
-app.listen(port, () => {
-  console.log(`GHL app listening on port ${port}`);
-});
+/* -------------------- Root -------------------- */
+app.get("/", (req, res) => res.sendFile(path + "index.html"));
+
+/* -------------------- Start server -------------------- */
+app.listen(port, () => console.log(`GHL app listening on port ${port}`));

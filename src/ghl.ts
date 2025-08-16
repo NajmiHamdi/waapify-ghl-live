@@ -1,117 +1,92 @@
 import qs from "qs";
 import axios, { AxiosRequestConfig, InternalAxiosRequestConfig } from "axios";
-import { createDecipheriv, createHash } from 'node:crypto';
+import { createDecipheriv, createHash } from "node:crypto";
+import { Storage } from "./storage";
 
-import { Model, TokenType } from "./model";
+export enum TokenType {
+  Bearer = "Bearer",
+}
 
-/* The GHL class is responsible for handling authorization, making API requests, and managing access
-tokens and refresh tokens for a specific resource. */
 export class GHL {
-  public model: Model;
+  constructor() {}
 
-  constructor() {
-    this.model = new Model();
-  }
-
-/**
- * The `authorizationHandler` function handles the authorization process by generating an access token
- * and refresh token pair.
- * @param {string} code - The code parameter is a string that represents the authorization code
- * obtained from the authorization server. It is used to exchange for an access token and refresh token
- * pair.
- */
+  /** Handle OAuth authorization code */
   async authorizationHandler(code: string) {
     if (!code) {
-      console.warn(
-        "Please provide code when making call to authorization Handler"
-      );
+      console.warn("Please provide code when making call to authorization Handler");
+      return;
     }
     await this.generateAccessTokenRefreshTokenPair(code);
   }
 
+  /** Decrypt SSO Data */
   decryptSSOData(key: string) {
     try {
       const blockSize = 16;
       const keySize = 32;
       const ivSize = 16;
       const saltSize = 8;
-      
-      const rawEncryptedData = Buffer.from(key, 'base64');
+
+      const rawEncryptedData = Buffer.from(key, "base64");
       const salt = rawEncryptedData.subarray(saltSize, blockSize);
       const cipherText = rawEncryptedData.subarray(blockSize);
-      
+
       let result = Buffer.alloc(0, 0);
-      while (result.length < (keySize + ivSize)) {
-        const hasher = createHash('md5');
+      while (result.length < keySize + ivSize) {
+        const hasher = createHash("md5");
         result = Buffer.concat([
           result,
-          hasher.update(Buffer.concat([
-            result.subarray(-ivSize),
-            Buffer.from(process.env.GHL_APP_SSO_KEY as string, 'utf-8'),
-            salt
-          ])).digest()
+          hasher.update(
+            Buffer.concat([
+              result.subarray(-ivSize),
+              Buffer.from(process.env.GHL_APP_SSO_KEY as string, "utf-8"),
+              salt,
+            ])
+          ).digest(),
         ]);
       }
-      
+
       const decipher = createDecipheriv(
-        'aes-256-cbc',
+        "aes-256-cbc",
         result.subarray(0, keySize),
         result.subarray(keySize, keySize + ivSize)
       );
-      
+
       const decrypted = decipher.update(cipherText);
       const finalDecrypted = Buffer.concat([decrypted, decipher.final()]);
       return JSON.parse(finalDecrypted.toString());
     } catch (error) {
-      console.error('Error decrypting SSO data:', error);
+      console.error("Error decrypting SSO data:", error);
       throw error;
     }
   }
 
-/**
- * The function creates an instance of Axios with a base URL and interceptors for handling
- * authorization and refreshing access tokens.
- * @param {string} resourceId - The `resourceId` parameter is a string that represents the locationId or companyId you want
- * to make api call for.
- * @returns an instance of the Axios library with some custom request and response interceptors.
- */
+  /** Create Axios instance with token intercept */
   requests(resourceId: string) {
     const baseUrl = process.env.GHL_API_DOMAIN;
 
-    if (!this.model.getAccessToken(resourceId)) {
-      throw new Error("Installation not found for the following resource");
-    }
+    const installation = Storage.find(resourceId);
+    if (!installation) throw new Error("Installation not found for the following resource");
 
     const axiosInstance = axios.create({
       baseURL: baseUrl,
     });
 
-    axiosInstance.interceptors.request.use(
-      async (requestConfig: InternalAxiosRequestConfig) => {
-        try {
-          requestConfig.headers["Authorization"] = `${
-            TokenType.Bearer
-          } ${this.model.getAccessToken(resourceId)}`;
-        } catch (e) {
-          console.error(e);
-        }
-        return requestConfig;
-      }
-    );
+    axiosInstance.interceptors.request.use(async (requestConfig: InternalAxiosRequestConfig) => {
+      requestConfig.headers["Authorization"] = `${TokenType.Bearer} ${installation.access_token}`;
+      return requestConfig;
+    });
 
-    axios.interceptors.response.use(
+    axiosInstance.interceptors.response.use(
       (response) => response,
-      (error) => {
+      async (error) => {
         const originalRequest = error.config;
 
-        if (error.response.status === 401 && !originalRequest._retry) {
+        if (error.response?.status === 401 && !originalRequest._retry) {
           originalRequest._retry = true;
-          return this.refreshAccessToken(resourceId).then(() => {
-            originalRequest.headers.Authorization = `Bearer ${this.model.getAccessToken(
-              resourceId
-            )}`;
-            return axios(originalRequest);
-          });
+          await this.refreshAccessToken(resourceId);
+          originalRequest.headers.Authorization = `Bearer ${Storage.find(resourceId)?.access_token}`;
+          return axios(originalRequest);
         }
 
         return Promise.reject(error);
@@ -121,43 +96,32 @@ export class GHL {
     return axiosInstance;
   }
 
-/**
- * The function checks if an installation exists for a given resource ID i.e locationId or companyId.
- * @param {string} resourceId - The `resourceId` parameter is a string that represents the ID of a
- * resource.
- * @returns a boolean value.
- */
-  checkInstallationExists(resourceId: string){
-    return !!this.model.getAccessToken(resourceId)
+  /** Check if installation exists */
+  checkInstallationExists(resourceId: string) {
+    return !!Storage.find(resourceId);
   }
 
-/**
- * The function `getLocationTokenFromCompanyToken` retrieves a location token from a company token and
- * saves the installation information.
- * @param {string} companyId - A string representing the ID of the company.
- * @param {string} locationId - The `locationId` parameter is a string that represents the unique
- * identifier of a location within a company.
- */
-  async getLocationTokenFromCompanyToken(
-    companyId: string,
-    locationId: string
-  ) {
+  /** Get location token from company token */
+  async getLocationTokenFromCompanyToken(companyId: string, locationId: string) {
     const res = await this.requests(companyId).post(
       "/oauth/locationToken",
-      {
-        companyId,
-        locationId,
-      },
-      {
-        headers: {
-          Version: "2021-07-28",
-        },
-      }
+      { companyId, locationId },
+      { headers: { Version: "2021-07-28" } }
     );
-    this.model.saveInstallationInfo(res.data);
+    Storage.save({
+      companyId,
+      locationId,
+      access_token: res.data.access_token,
+      refresh_token: res.data.refresh_token,
+      expires_in: res.data.expires_in,
+    });
   }
 
+  /** Refresh access token */
   private async refreshAccessToken(resourceId: string) {
+    const installation = Storage.find(resourceId);
+    if (!installation) throw new Error("No installation found to refresh token");
+
     try {
       const resp = await axios.post(
         `${process.env.GHL_API_DOMAIN}/oauth/token`,
@@ -165,17 +129,24 @@ export class GHL {
           client_id: process.env.GHL_APP_CLIENT_ID,
           client_secret: process.env.GHL_APP_CLIENT_SECRET,
           grant_type: "refresh_token",
-          refresh_token: this.model.getRefreshToken(resourceId),
+          refresh_token: installation.refresh_token,
         }),
         { headers: { "content-type": "application/x-www-form-urlencoded" } }
       );
-      this.model.setAccessToken(resourceId, resp.data.access_token);
-      this.model.setRefreshToken(resourceId, resp.data.refresh_token);
+
+      Storage.save({
+        companyId: installation.companyId,
+        locationId: installation.locationId,
+        access_token: resp.data.access_token,
+        refresh_token: resp.data.refresh_token,
+        expires_in: resp.data.expires_in,
+      });
     } catch (error: any) {
       console.error(error?.response?.data);
     }
   }
 
+  /** Generate access & refresh token pair */
   private async generateAccessTokenRefreshTokenPair(code: string) {
     try {
       const resp = await axios.post(
@@ -188,7 +159,14 @@ export class GHL {
         }),
         { headers: { "content-type": "application/x-www-form-urlencoded" } }
       );
-      this.model.saveInstallationInfo(resp.data);
+
+      Storage.save({
+        companyId: resp.data.companyId,
+        locationId: resp.data.locationId,
+        access_token: resp.data.access_token,
+        refresh_token: resp.data.refresh_token,
+        expires_in: resp.data.expires_in,
+      });
     } catch (error: any) {
       console.error(error?.response?.data);
     }
